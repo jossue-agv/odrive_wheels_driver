@@ -195,6 +195,15 @@ bool ODriveWheelsDriverNode::init_driver() {
     static_cast<double>(vel_gain_), static_cast<double>(vel_integrator_gain_),
     static_cast<double>(vel_limit_));
 
+  const bool left_mode_ok = driver_->set_controller_mode(
+    left_axis_id_, control_mode::VELOCITY, input_mode::PASSTHROUGH);
+  const bool right_mode_ok = driver_->set_controller_mode(
+    right_axis_id_, control_mode::VELOCITY, input_mode::PASSTHROUGH);
+  if (!left_mode_ok || !right_mode_ok) {
+    return fail_initialization("Failed to configure ODrive controller mode");
+  }
+  RCLCPP_INFO(get_logger(), "Configured ODrive controller mode: VELOCITY + PASSTHROUGH");
+
   const bool left_zero_ok = driver_->set_velocity(left_axis_id_, 0.0F);
   const bool right_zero_ok = driver_->set_velocity(right_axis_id_, 0.0F);
   if (!left_zero_ok || !right_zero_ok) {
@@ -541,6 +550,24 @@ void ODriveWheelsDriverNode::on_motor_enable(const std_msgs::msg::Bool& msg) {
       return;
     }
     RCLCPP_INFO(get_logger(), "Enabling motors → CLOSED_LOOP_CONTROL");
+    const bool left_gains_ok = driver_->set_velocity_gains(
+      left_axis_id_, vel_gain_, vel_integrator_gain_);
+    const bool right_gains_ok = driver_->set_velocity_gains(
+      right_axis_id_, vel_gain_, vel_integrator_gain_);
+    const bool left_limit_ok = driver_->set_velocity_limit(left_axis_id_, vel_limit_);
+    const bool right_limit_ok = driver_->set_velocity_limit(right_axis_id_, vel_limit_);
+    const bool left_mode_ok = driver_->set_controller_mode(
+      left_axis_id_, control_mode::VELOCITY, input_mode::PASSTHROUGH);
+    const bool right_mode_ok = driver_->set_controller_mode(
+      right_axis_id_, control_mode::VELOCITY, input_mode::PASSTHROUGH);
+    if (!left_gains_ok || !right_gains_ok || !left_limit_ok || !right_limit_ok ||
+        !left_mode_ok || !right_mode_ok) {
+      RCLCPP_WARN(get_logger(),
+        "motor_enable: failed to reapply velocity gains, limits, or controller mode");
+      return;
+    }
+    send_velocity(left_axis_id_, 0.0f);
+    send_velocity(right_axis_id_, 0.0f);
     send_axis_state(left_axis_id_, AxisState::CLOSED_LOOP_CONTROL);
     send_axis_state(right_axis_id_, AxisState::CLOSED_LOOP_CONTROL);
   } else {

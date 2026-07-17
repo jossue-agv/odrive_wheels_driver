@@ -172,6 +172,13 @@ bool ODriveDriver::set_axis_state(uint8_t node_id, AxisState state) {
   return send_frame(make_arb_id(node_id, cmd::SET_AXIS_STATE), data);
 }
 
+bool ODriveDriver::set_controller_mode(
+    uint8_t node_id, uint32_t control_mode, uint32_t input_mode) {
+  uint8_t data[8];
+  pack_controller_mode(data, control_mode, input_mode);
+  return send_frame(make_arb_id(node_id, cmd::SET_CONTROLLER_MODE), data);
+}
+
 bool ODriveDriver::set_velocity_gains(
     uint8_t node_id, float vel_gain, float vel_integrator_gain) {
   uint8_t data[8];

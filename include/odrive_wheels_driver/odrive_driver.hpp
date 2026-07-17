@@ -45,6 +45,7 @@ public:
 
   bool set_velocity(uint8_t node_id, float velocity_turns_per_s, float torque_ff = 0.0f);
   bool set_axis_state(uint8_t node_id, AxisState state);
+  bool set_controller_mode(uint8_t node_id, uint32_t control_mode, uint32_t input_mode);
   bool set_velocity_gains(uint8_t node_id, float vel_gain, float vel_integrator_gain);
   bool set_velocity_limit(uint8_t node_id, float vel_limit);
   void stop_and_idle();

@@ -29,12 +29,27 @@ namespace cmd {
   constexpr uint8_t RX_SDO                = 0x04;
   constexpr uint8_t SET_AXIS_STATE        = 0x07;
   constexpr uint8_t GET_ENCODER_ESTIMATES = 0x09;
+  constexpr uint8_t SET_CONTROLLER_MODE   = 0x0B;
   constexpr uint8_t SET_INPUT_VEL         = 0x0D;
   constexpr uint8_t GET_TEMPERATURE       = 0x15;
   constexpr uint8_t REBOOT                = 0x16;
   constexpr uint8_t GET_VBUS_VOLTAGE      = 0x17;
   constexpr uint8_t CLEAR_ERRORS          = 0x18;
   constexpr uint8_t SET_VEL_GAINS         = 0x1B;
+}
+
+// -- Controller modes (Set_Controller_Mode, cmd 0x0B) --
+namespace control_mode {
+  constexpr uint32_t VOLTAGE  = 0;
+  constexpr uint32_t TORQUE   = 1;
+  constexpr uint32_t VELOCITY = 2;
+  constexpr uint32_t POSITION = 3;
+}
+
+namespace input_mode {
+  constexpr uint32_t INACTIVE    = 0;
+  constexpr uint32_t PASSTHROUGH = 1;
+  constexpr uint32_t VEL_RAMP    = 2;
 }
 
 // -- Axis states --
@@ -144,6 +159,13 @@ inline void pack_axis_state(uint8_t* data, AxisState state) {
   uint32_t s = static_cast<uint32_t>(state);
   std::memcpy(&data[0], &s, 4);
   std::memset(&data[4], 0, 4);
+}
+
+// -- Controller mode command packing (Control_Mode + Input_Mode, 2x uint32) --
+inline void pack_controller_mode(uint8_t* data, uint32_t control_mode_val,
+                                 uint32_t input_mode_val) {
+  std::memcpy(&data[0], &control_mode_val, 4);
+  std::memcpy(&data[4], &input_mode_val, 4);
 }
 
 // -- Velocity-loop PI gains (Set_Vel_Gains, cmd 0x1B) --

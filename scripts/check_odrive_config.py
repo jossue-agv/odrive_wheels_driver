@@ -34,7 +34,7 @@ TARGETS = {
     "controller.config.input_filter_bandwidth": 8.0,
     "controller.config.vel_ramp_rate":          0.5,
     "controller.config.vel_limit":              10.0,
-    "controller.config.input_mode":             2,    # INPUT_MODE_VEL_RAMP
+    "controller.config.input_mode":             1,    # INPUT_MODE_PASSTHROUGH
     "motor.motor_thermistor.config.enabled":    False,
 }
 
