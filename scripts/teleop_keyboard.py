@@ -28,7 +28,7 @@ else:
     import tty
 
 
-MAX_LIN_VEL = 0.5
+MAX_LIN_VEL = 0.45
 MAX_ANG_VEL = 0.5
 
 LIN_VEL_STEP_SIZE = 0.05
@@ -42,7 +42,7 @@ Moving around:
    a    s    d
         x
 
-w/x : increase/decrease linear velocity (max: 0.5 m/s)
+w/x : increase/decrease linear velocity (max: 0.45 m/s)
 a/d : increase/decrease angular velocity (max: 0.5 rad/s)
 p   : set maximum forward linear velocity
 
