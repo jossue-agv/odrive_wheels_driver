@@ -189,6 +189,7 @@ bool ODriveWheelsDriverNode::init_driver() {
   if (!left_gains_ok || !right_gains_ok || !left_limit_ok || !right_limit_ok) {
     return fail_initialization("Failed to configure ODrive velocity gains or limits");
   }
+  applied_vel_limit_ = vel_limit_;
   RCLCPP_INFO(
     get_logger(),
     "Configured velocity gains (%.3f, %.3f) and limit %.3f turns/s",
@@ -432,14 +433,15 @@ void ODriveWheelsDriverNode::on_cmd_vel(const geometry_msgs::msg::Twist& msg) {
                                               wheel_radius_, track_width_, gear_ratio_);
   const double max_requested_turns =
     std::max(std::abs(wheels.left), std::abs(wheels.right));
-  if (vel_limit_ > 0.0f && max_requested_turns > static_cast<double>(vel_limit_)) {
-    const double scale = static_cast<double>(vel_limit_) / max_requested_turns;
-    RCLCPP_DEBUG(get_logger(),
-      "cmd_vel saturated to ODrive vel_limit: requested=(%.4f, %.4f) turns/s "
-      "limit=%.4f scale=%.4f",
-      wheels.left, wheels.right, static_cast<double>(vel_limit_), scale);
-    wheels.left *= scale;
-    wheels.right *= scale;
+  if (max_requested_turns > 0.0) {
+    const float required_vel_limit =
+      static_cast<float>(max_requested_turns * 1.05);
+    if (!ensure_velocity_limit(required_vel_limit)) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "cmd_vel ignored: failed to raise ODrive vel_limit to %.3f turns/s",
+        static_cast<double>(required_vel_limit));
+      return;
+    }
   }
   RCLCPP_DEBUG(get_logger(),
     "cmd_vel IK target: left=%.4f turns/s right=%.4f turns/s "
@@ -530,6 +532,32 @@ void ODriveWheelsDriverNode::send_velocity_with_ff(uint8_t node_id, float vel_tu
       "CAN send failed (%d consecutive) on %s",
       driver_->consecutive_send_failures(), can_interface_.c_str());
   }
+}
+
+bool ODriveWheelsDriverNode::ensure_velocity_limit(float required_vel_limit) {
+  if (required_vel_limit <= 0.0f) {
+    return true;
+  }
+
+  const float target_limit = std::max(required_vel_limit, vel_limit_);
+  if (target_limit <= applied_vel_limit_ + 0.25f) {
+    return true;
+  }
+
+  RCLCPP_DEBUG(get_logger(),
+    "raising ODrive vel_limit for cmd_vel: current=%.3f required=%.3f target=%.3f turns/s",
+    static_cast<double>(applied_vel_limit_),
+    static_cast<double>(required_vel_limit),
+    static_cast<double>(target_limit));
+
+  const bool left_ok = driver_->set_velocity_limit(left_axis_id_, target_limit);
+  const bool right_ok = driver_->set_velocity_limit(right_axis_id_, target_limit);
+  if (!left_ok || !right_ok) {
+    return false;
+  }
+
+  applied_vel_limit_ = target_limit;
+  return true;
 }
 
 void ODriveWheelsDriverNode::send_axis_state(uint8_t node_id, AxisState state) {
@@ -624,6 +652,7 @@ void ODriveWheelsDriverNode::on_motor_enable(const std_msgs::msg::Bool& msg) {
         "motor_enable: failed to reapply velocity gains, limits, or controller mode");
       return;
     }
+    applied_vel_limit_ = vel_limit_;
     send_velocity(left_axis_id_, 0.0f);
     send_velocity(right_axis_id_, 0.0f);
     send_axis_state(left_axis_id_, AxisState::CLOSED_LOOP_CONTROL);

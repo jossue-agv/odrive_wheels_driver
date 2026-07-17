@@ -42,6 +42,7 @@ private:
   float vel_gain_;
   float vel_integrator_gain_;
   float vel_limit_;
+  float applied_vel_limit_ = 0.0f;
   double gear_ratio_;  // motor_turns / wheel_turns (see odrive_wheels_driver_node.cpp for docs)
   double max_fet_temp_;
   double max_motor_temp_;
@@ -53,6 +54,7 @@ private:
   void read_can_messages();
   void send_velocity(uint8_t node_id, float vel_turns_per_s);
   void send_velocity_with_ff(uint8_t node_id, float vel_turns_per_s, float torque_ff);
+  bool ensure_velocity_limit(float required_vel_limit);
   float apply_wheel_shaping(float target, float& prev_cmd, double scale, float dt);
   void send_axis_state(uint8_t node_id, AxisState state);
   void stop_motors();
