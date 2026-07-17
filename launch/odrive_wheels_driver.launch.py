@@ -14,12 +14,17 @@ def generate_launch_description():
             'cmd_vel_topic', default_value='cmd_vel',
             description='cmd_vel input topic (use cmd_vel_safe when velocity smoother + collision monitor active)'),
 
+        DeclareLaunchArgument(
+            'log_level', default_value='info',
+            description='ROS log level for odrive_wheels_driver_node'),
+
         Node(
             package='odrive_wheels_driver',
             executable='odrive_wheels_driver_node',
             name='odrive_wheels_driver_node',
             namespace=LaunchConfiguration('namespace'),
             remappings=[('cmd_vel', LaunchConfiguration('cmd_vel_topic'))],
+            arguments=['--ros-args', '--log-level', LaunchConfiguration('log_level')],
             output='screen',
         ),
     ])

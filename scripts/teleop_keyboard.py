@@ -15,7 +15,6 @@ __author__ = "Jossue Espinoza"
 import os
 import select
 import sys
-import time
 
 import rclpy
 from geometry_msgs.msg import Twist
@@ -29,9 +28,8 @@ else:
     import tty
 
 
-MAX_LIN_VEL = 0.5
-MAX_ANG_VEL = 0.5
-DEADMAN_TIMEOUT_SECONDS = 0.5
+MAX_LIN_VEL = 1.0
+MAX_ANG_VEL = 1.0
 
 LIN_VEL_STEP_SIZE = 0.05
 ANG_VEL_STEP_SIZE = 0.1
@@ -44,14 +42,12 @@ Moving around:
    a    s    d
         x
 
-w/x : increase/decrease linear velocity (max: 0.5 m/s)
-a/d : increase/decrease angular velocity (max: 0.5 rad/s)
+w/x : increase/decrease linear velocity (max: 1.0 m/s)
+a/d : increase/decrease angular velocity (max: 1.0 rad/s)
 p   : set maximum forward linear velocity
 
 space, s : force stop
 Ctrl+C   : quit
-
-Deadman: stops 0.5 s after the last movement key.
 """
 
 
@@ -108,7 +104,6 @@ def main():
 
     target_linear_velocity = 0.0
     target_angular_velocity = 0.0
-    last_movement_key_time = None
     status = 0
 
     node.get_logger().warning("Publishing velocity commands on: cmd_vel")
@@ -140,10 +135,6 @@ def main():
         print(HELP)
         while rclpy.ok():
             key = get_key(settings)
-            movement_key = key.lower() in ("w", "x", "p", "a", "d")
-            if movement_key:
-                last_movement_key_time = time.monotonic()
-
             if key.lower() == "w":
                 target_linear_velocity = check_linear_limit_velocity(
                     target_linear_velocity + LIN_VEL_STEP_SIZE
@@ -165,17 +156,8 @@ def main():
             elif key == " " or key.lower() == "s":
                 target_linear_velocity = 0.0
                 target_angular_velocity = 0.0
-                last_movement_key_time = None
             elif key == "\x03":
                 break
-
-            if (
-                last_movement_key_time is not None
-                and time.monotonic() - last_movement_key_time > DEADMAN_TIMEOUT_SECONDS
-            ):
-                target_linear_velocity = 0.0
-                target_angular_velocity = 0.0
-                last_movement_key_time = None
 
             if key:
                 status += 1
@@ -187,8 +169,6 @@ def main():
                 print(HELP)
                 status = 0
 
-            # The local deadman resets stale targets before publishing, while
-            # the driver's command watchdog remains a fallback.
             publisher.publish(
                 make_twist(target_linear_velocity, target_angular_velocity)
             )
