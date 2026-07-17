@@ -11,19 +11,19 @@ namespace odrive_wheels_driver {
 ODriveWheelsDriverNode::ODriveWheelsDriverNode() : Node("odrive_wheels_driver_node") {
   // -- Declare parameters --
   this->declare_parameter("can_interface", "can0");
-  this->declare_parameter("left_axis_id", 0);
-  this->declare_parameter("right_axis_id", 1);
+  this->declare_parameter("left_axis_id", 1);
+  this->declare_parameter("right_axis_id", 0);
   // Calibrated geometry for the current 10:1 drivetrain.
   this->declare_parameter("wheel_radius", 0.0625);
   this->declare_parameter("track_width", 0.720);
   this->declare_parameter("publish_rate_hz", 50);
   this->declare_parameter("cmd_vel_timeout_ms", 200);
-  this->declare_parameter("invert_left", false);
-  this->declare_parameter("invert_right", true);
+  this->declare_parameter("invert_left", true);
+  this->declare_parameter("invert_right", false);
   this->declare_parameter("left_scale", 1.0);
   this->declare_parameter("right_scale", 1.0);
   this->declare_parameter("min_effective_vel", 0.0);
-  this->declare_parameter("stiction_torque_ff", 0.03);
+  this->declare_parameter("stiction_torque_ff", 0.08);
   this->declare_parameter("max_wheel_accel", 10.0);
   this->declare_parameter("max_wheel_decel", 10.0);
   this->declare_parameter("zero_vel_epsilon", 0.03);
