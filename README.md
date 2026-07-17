@@ -90,11 +90,11 @@ ros2 run odrive_wheels_driver check_odrive_config --apply
 | `invert_left` | `true` | Negate left motor direction |
 | `invert_right` | `false` | Negate right motor direction |
 | `left_scale` / `right_scale` | `1.0` | Per-wheel velocity trim |
-| `max_wheel_accel` | `0.625` | Acceleration rate limiter (turns/s²) |
-| `max_wheel_decel` | `1.875` | Deceleration rate limiter (turns/s²) |
+| `max_wheel_accel` | `10.0` | Acceleration rate limiter (turns/s²) |
+| `max_wheel_decel` | `10.0` | Deceleration rate limiter (turns/s²) |
 | `zero_vel_epsilon` | `0.03` | Velocity deadband (turns/s) |
 | `min_effective_vel` | `0.0` | Stiction compensation minimum |
-| `stiction_torque_ff` | `0.08` | Torque feedforward (Nm) |
+| `stiction_torque_ff` | `0.03` | Torque feedforward (Nm) |
 
 ## Key Algorithms
 
