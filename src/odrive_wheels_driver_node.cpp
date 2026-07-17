@@ -398,10 +398,20 @@ void ODriveWheelsDriverNode::publish_joint_states() {
 // ── cmd_vel callback ──
 
 void ODriveWheelsDriverNode::on_cmd_vel(const geometry_msgs::msg::Twist& msg) {
-  if (e_stop_active_) return;
+  RCLCPP_DEBUG(get_logger(), "cmd_vel received: linear=%.4f angular=%.4f",
+               msg.linear.x, msg.angular.z);
+
+  if (e_stop_active_) {
+    RCLCPP_DEBUG(get_logger(), "cmd_vel ignored: e_stop is active");
+    return;
+  }
   if (!motors_armed()) {
     const auto& left = driver_->left();
     const auto& right = driver_->right();
+    RCLCPP_DEBUG(get_logger(),
+      "cmd_vel ignored: motors not armed or feedback stale "
+      "(left_state=%d right_state=%d feedback_ok=%s)",
+      left.state, right.state, feedback_ok_ ? "true" : "false");
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 3000,
       "cmd_vel received but motors not armed (left=%d, right=%d)",
       left.state, right.state);
@@ -420,6 +430,10 @@ void ODriveWheelsDriverNode::on_cmd_vel(const geometry_msgs::msg::Twist& msg) {
   // Differential drive inverse kinematics: m/s → motor turns/s
   auto wheels = kinematics::cmd_vel_to_wheels(msg.linear.x, msg.angular.z,
                                               wheel_radius_, track_width_, gear_ratio_);
+  RCLCPP_DEBUG(get_logger(),
+    "cmd_vel IK target: left=%.4f turns/s right=%.4f turns/s "
+    "(wheel_radius=%.4f track_width=%.4f gear_ratio=%.2f)",
+    wheels.left, wheels.right, wheel_radius_, track_width_, gear_ratio_);
 
   // Apply shaping: inversion → scale → accel limit → min effective → torque_ff
   float left_cmd  = apply_wheel_shaping(static_cast<float>(wheels.left), left_prev_cmd_,
@@ -429,6 +443,13 @@ void ODriveWheelsDriverNode::on_cmd_vel(const geometry_msgs::msg::Twist& msg) {
 
   float left_ff  = (std::abs(left_cmd) > 0.001f) ? std::copysign(stiction_torque_ff_, left_cmd) : 0.0f;
   float right_ff = (std::abs(right_cmd) > 0.001f) ? std::copysign(stiction_torque_ff_, right_cmd) : 0.0f;
+  RCLCPP_DEBUG(get_logger(),
+    "cmd_vel shaped command: left=%.4f right=%.4f torque_ff=(%.4f, %.4f) dt=%.4f "
+    "sign_scale=(%.2f, %.2f)",
+    static_cast<double>(left_cmd), static_cast<double>(right_cmd),
+    static_cast<double>(left_ff), static_cast<double>(right_ff),
+    static_cast<double>(shaping_dt),
+    left_sign_ * left_scale_, right_sign_ * right_scale_);
 
   send_velocity_with_ff(left_axis_id_, left_cmd, left_ff);
   send_velocity_with_ff(right_axis_id_, right_cmd, right_ff);
@@ -437,6 +458,7 @@ void ODriveWheelsDriverNode::on_cmd_vel(const geometry_msgs::msg::Twist& msg) {
 // ── E-stop callback ──
 
 void ODriveWheelsDriverNode::on_e_stop(const std_msgs::msg::Bool& msg) {
+  RCLCPP_DEBUG(get_logger(), "e_stop received: %s", msg.data ? "true" : "false");
   if (msg.data && !e_stop_active_) {
     RCLCPP_WARN(get_logger(), "E-STOP ACTIVATED");
     e_stop_active_ = true;
@@ -483,7 +505,15 @@ void ODriveWheelsDriverNode::send_velocity(uint8_t node_id, float vel_turns_per_
 }
 
 void ODriveWheelsDriverNode::send_velocity_with_ff(uint8_t node_id, float vel_turns_per_s, float torque_ff) {
-  if (!driver_->is_connected()) return;
+  if (!driver_->is_connected()) {
+    RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 1000,
+      "velocity command skipped: CAN driver is not connected");
+    return;
+  }
+  RCLCPP_DEBUG(get_logger(), "CAN velocity command: node=%u vel=%.4f torque_ff=%.4f",
+               static_cast<unsigned>(node_id),
+               static_cast<double>(vel_turns_per_s),
+               static_cast<double>(torque_ff));
   if (!driver_->set_velocity(node_id, vel_turns_per_s, torque_ff)) {
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
       "CAN send failed (%d consecutive) on %s",
@@ -492,7 +522,14 @@ void ODriveWheelsDriverNode::send_velocity_with_ff(uint8_t node_id, float vel_tu
 }
 
 void ODriveWheelsDriverNode::send_axis_state(uint8_t node_id, AxisState state) {
-  if (!driver_->is_connected()) return;
+  if (!driver_->is_connected()) {
+    RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 1000,
+      "axis-state command skipped: CAN driver is not connected");
+    return;
+  }
+  RCLCPP_DEBUG(get_logger(), "CAN axis-state command: node=%u state=%u",
+               static_cast<unsigned>(node_id),
+               static_cast<unsigned>(state));
   if (!driver_->set_axis_state(node_id, state)) {
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
       "CAN send failed (%d consecutive) on %s",
@@ -543,8 +580,10 @@ void ODriveWheelsDriverNode::publish_motor_state() {
 }
 
 void ODriveWheelsDriverNode::on_motor_enable(const std_msgs::msg::Bool& msg) {
+  RCLCPP_DEBUG(get_logger(), "motor_enable received: %s", msg.data ? "true" : "false");
   if (msg.data) {
     if (thermal_state_ == "critical") {
+      RCLCPP_DEBUG(get_logger(), "motor_enable ignored: thermal_state=critical");
       RCLCPP_WARN(get_logger(),
         "motor_enable rejected: thermal state is critical (must cool below warning limits)");
       return;
@@ -560,6 +599,14 @@ void ODriveWheelsDriverNode::on_motor_enable(const std_msgs::msg::Bool& msg) {
       left_axis_id_, control_mode::VELOCITY, input_mode::PASSTHROUGH);
     const bool right_mode_ok = driver_->set_controller_mode(
       right_axis_id_, control_mode::VELOCITY, input_mode::PASSTHROUGH);
+    RCLCPP_DEBUG(get_logger(),
+      "motor_enable reapply config: gains=(%s,%s) limits=(%s,%s) mode=(%s,%s)",
+      left_gains_ok ? "ok" : "fail",
+      right_gains_ok ? "ok" : "fail",
+      left_limit_ok ? "ok" : "fail",
+      right_limit_ok ? "ok" : "fail",
+      left_mode_ok ? "ok" : "fail",
+      right_mode_ok ? "ok" : "fail");
     if (!left_gains_ok || !right_gains_ok || !left_limit_ok || !right_limit_ok ||
         !left_mode_ok || !right_mode_ok) {
       RCLCPP_WARN(get_logger(),
@@ -571,6 +618,7 @@ void ODriveWheelsDriverNode::on_motor_enable(const std_msgs::msg::Bool& msg) {
     send_axis_state(left_axis_id_, AxisState::CLOSED_LOOP_CONTROL);
     send_axis_state(right_axis_id_, AxisState::CLOSED_LOOP_CONTROL);
   } else {
+    RCLCPP_DEBUG(get_logger(), "motor_enable false: zero velocity and request IDLE");
     RCLCPP_INFO(get_logger(), "Disabling motors → IDLE");
     send_velocity(left_axis_id_, 0.0f);
     send_velocity(right_axis_id_, 0.0f);
