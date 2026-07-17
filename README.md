@@ -94,7 +94,7 @@ ros2 run odrive_wheels_driver check_odrive_config --apply
 | `max_wheel_decel` | `1.875` | Deceleration rate limiter (turns/s²) |
 | `zero_vel_epsilon` | `0.03` | Velocity deadband (turns/s) |
 | `min_effective_vel` | `0.0` | Stiction compensation minimum |
-| `stiction_torque_ff` | `0.03` | Torque feedforward (Nm) |
+| `stiction_torque_ff` | `0.08` | Torque feedforward (Nm) |
 
 ## Key Algorithms
 

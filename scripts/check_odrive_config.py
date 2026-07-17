@@ -29,8 +29,8 @@ except ImportError:
 # vel_integrator_gain lowered from 0.333 → 0.167: the integrator at 0.333
 # causes overshoot at low speeds, which manifests as stick-slip / chatter.
 TARGETS = {
-    "controller.config.vel_gain":               0.167,
-    "controller.config.vel_integrator_gain":    0.167,
+    "controller.config.vel_gain":               0.30,
+    "controller.config.vel_integrator_gain":    0.30,
     "controller.config.input_filter_bandwidth": 8.0,
     "controller.config.vel_ramp_rate":          0.5,
     "controller.config.vel_limit":              10.0,
