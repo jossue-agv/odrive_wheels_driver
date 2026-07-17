@@ -62,6 +62,8 @@ private:
   // -- ROS-side control and safety state --
   float left_prev_cmd_ = 0.0f;
   float right_prev_cmd_ = 0.0f;
+  float target_left_turns_ = 0.0f;
+  float target_right_turns_ = 0.0f;
   int left_thermal_level_ = 0;
   int right_thermal_level_ = 0;
 

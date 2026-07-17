@@ -311,10 +311,31 @@ void ODriveWheelsDriverNode::main_loop() {
   // cmd_vel timeout: stop if no command received recently
   auto elapsed_ms = (this->now() - last_cmd_vel_time_).nanoseconds() / 1000000;
   if (elapsed_ms > cmd_vel_timeout_ms_ && !e_stop_active_) {
-    left_prev_cmd_ = 0.0f;
-    right_prev_cmd_ = 0.0f;
-    send_velocity(left_axis_id_, 0.0f);
-    send_velocity(right_axis_id_, 0.0f);
+    target_left_turns_ = 0.0f;
+    target_right_turns_ = 0.0f;
+  }
+
+  // Send the latest target at a fixed rate. This keeps the ODrive input fresh
+  // even when the teleop publisher is only updating at keyboard polling speed.
+  if (!e_stop_active_ && motors_armed()) {
+    const float loop_dt = 1.0f / static_cast<float>(publish_rate_hz_);
+    const float left_cmd = apply_wheel_shaping(
+      target_left_turns_, left_prev_cmd_, left_sign_ * left_scale_, loop_dt);
+    const float right_cmd = apply_wheel_shaping(
+      target_right_turns_, right_prev_cmd_, right_sign_ * right_scale_, loop_dt);
+    const float left_ff =
+      (std::abs(left_cmd) > 0.001f) ? std::copysign(stiction_torque_ff_, left_cmd) : 0.0f;
+    const float right_ff =
+      (std::abs(right_cmd) > 0.001f) ? std::copysign(stiction_torque_ff_, right_cmd) : 0.0f;
+
+    RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 500,
+      "CAN loop command: target=(%.4f, %.4f) sent=(%.4f, %.4f) torque_ff=(%.4f, %.4f)",
+      static_cast<double>(target_left_turns_), static_cast<double>(target_right_turns_),
+      static_cast<double>(left_cmd), static_cast<double>(right_cmd),
+      static_cast<double>(left_ff), static_cast<double>(right_ff));
+
+    send_velocity_with_ff(left_axis_id_, left_cmd, left_ff);
+    send_velocity_with_ff(right_axis_id_, right_cmd, right_ff);
   }
 
   // Publish raw encoder position and velocity without integrating a pose.
@@ -419,14 +440,7 @@ void ODriveWheelsDriverNode::on_cmd_vel(const geometry_msgs::msg::Twist& msg) {
     return;
   }
 
-  const auto cmd_now = this->now();
-  // Accel limiting must use the real inter-command interval: upstream
-  // publishers range from ~10 Hz teleop to 50 Hz Nav2, and assuming a fixed
-  // rate would make the effective accel limit scale with the sender's rate.
-  // Clamped so a long gap cannot authorize one huge velocity step.
-  const float shaping_dt = static_cast<float>(
-      std::clamp((cmd_now - last_cmd_vel_time_).seconds(), 0.001, 0.1));
-  last_cmd_vel_time_ = cmd_now;
+  last_cmd_vel_time_ = this->now();
 
   // Differential drive inverse kinematics: m/s → motor turns/s
   auto wheels = kinematics::cmd_vel_to_wheels(msg.linear.x, msg.angular.z,
@@ -448,24 +462,12 @@ void ODriveWheelsDriverNode::on_cmd_vel(const geometry_msgs::msg::Twist& msg) {
     "(wheel_radius=%.4f track_width=%.4f gear_ratio=%.2f)",
     wheels.left, wheels.right, wheel_radius_, track_width_, gear_ratio_);
 
-  // Apply shaping: inversion → scale → accel limit → min effective → torque_ff
-  float left_cmd  = apply_wheel_shaping(static_cast<float>(wheels.left), left_prev_cmd_,
-                                        left_sign_ * left_scale_, shaping_dt);
-  float right_cmd = apply_wheel_shaping(static_cast<float>(wheels.right), right_prev_cmd_,
-                                        right_sign_ * right_scale_, shaping_dt);
-
-  float left_ff  = (std::abs(left_cmd) > 0.001f) ? std::copysign(stiction_torque_ff_, left_cmd) : 0.0f;
-  float right_ff = (std::abs(right_cmd) > 0.001f) ? std::copysign(stiction_torque_ff_, right_cmd) : 0.0f;
+  target_left_turns_ = static_cast<float>(wheels.left);
+  target_right_turns_ = static_cast<float>(wheels.right);
   RCLCPP_DEBUG(get_logger(),
-    "cmd_vel shaped command: left=%.4f right=%.4f torque_ff=(%.4f, %.4f) dt=%.4f "
-    "sign_scale=(%.2f, %.2f)",
-    static_cast<double>(left_cmd), static_cast<double>(right_cmd),
-    static_cast<double>(left_ff), static_cast<double>(right_ff),
-    static_cast<double>(shaping_dt),
-    left_sign_ * left_scale_, right_sign_ * right_scale_);
-
-  send_velocity_with_ff(left_axis_id_, left_cmd, left_ff);
-  send_velocity_with_ff(right_axis_id_, right_cmd, right_ff);
+    "cmd_vel target stored: left=%.4f right=%.4f turns/s",
+    static_cast<double>(target_left_turns_),
+    static_cast<double>(target_right_turns_));
 }
 
 // ── E-stop callback ──
@@ -475,6 +477,8 @@ void ODriveWheelsDriverNode::on_e_stop(const std_msgs::msg::Bool& msg) {
   if (msg.data && !e_stop_active_) {
     RCLCPP_WARN(get_logger(), "E-STOP ACTIVATED");
     e_stop_active_ = true;
+    target_left_turns_ = 0.0f;
+    target_right_turns_ = 0.0f;
     left_prev_cmd_ = 0.0f;
     right_prev_cmd_ = 0.0f;
     send_velocity(left_axis_id_, 0.0f);
@@ -660,6 +664,10 @@ void ODriveWheelsDriverNode::on_motor_enable(const std_msgs::msg::Bool& msg) {
   } else {
     RCLCPP_DEBUG(get_logger(), "motor_enable false: zero velocity and request IDLE");
     RCLCPP_INFO(get_logger(), "Disabling motors → IDLE");
+    target_left_turns_ = 0.0f;
+    target_right_turns_ = 0.0f;
+    left_prev_cmd_ = 0.0f;
+    right_prev_cmd_ = 0.0f;
     send_velocity(left_axis_id_, 0.0f);
     send_velocity(right_axis_id_, 0.0f);
     send_axis_state(left_axis_id_, AxisState::IDLE);
