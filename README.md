@@ -12,6 +12,32 @@ It converts `cmd_vel` into motor velocity commands and publishes raw encoder fee
 > Mantuve en scripts check_odrive_config por si acaso
 > Agregué confirmaciones de puerto CAN para fallar temprano
 
+## Clone
+## Clone
+```bash
+cd ~/colcon_ws/src
+git clone https://github.com/jossue-agv/odrive_wheels_driver
+```
+
+## Build
+
+From the workspace root:
+
+```bash
+cd ~/colcon_ws
+colcon build --packages-select odrive_wheels_driver
+source install/setup.bash
+```
+
+If ROS 2 Jazzy is installed in a different location, source the matching
+`setup.bash`.
+
+## Run
+
+```bash
+ros2 launch odrive_wheels_driver odrive_wheels_driver.launch.py
+```
+
 ## Nodes
 
 - **odrive_wheels_driver_node** (C++17): ROS 2 wrapper for topics, parameters, command shaping, and safety policy.
