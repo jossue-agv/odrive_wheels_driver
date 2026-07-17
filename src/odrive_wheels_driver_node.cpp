@@ -430,6 +430,17 @@ void ODriveWheelsDriverNode::on_cmd_vel(const geometry_msgs::msg::Twist& msg) {
   // Differential drive inverse kinematics: m/s → motor turns/s
   auto wheels = kinematics::cmd_vel_to_wheels(msg.linear.x, msg.angular.z,
                                               wheel_radius_, track_width_, gear_ratio_);
+  const double max_requested_turns =
+    std::max(std::abs(wheels.left), std::abs(wheels.right));
+  if (vel_limit_ > 0.0f && max_requested_turns > static_cast<double>(vel_limit_)) {
+    const double scale = static_cast<double>(vel_limit_) / max_requested_turns;
+    RCLCPP_DEBUG(get_logger(),
+      "cmd_vel saturated to ODrive vel_limit: requested=(%.4f, %.4f) turns/s "
+      "limit=%.4f scale=%.4f",
+      wheels.left, wheels.right, static_cast<double>(vel_limit_), scale);
+    wheels.left *= scale;
+    wheels.right *= scale;
+  }
   RCLCPP_DEBUG(get_logger(),
     "cmd_vel IK target: left=%.4f turns/s right=%.4f turns/s "
     "(wheel_radius=%.4f track_width=%.4f gear_ratio=%.2f)",
