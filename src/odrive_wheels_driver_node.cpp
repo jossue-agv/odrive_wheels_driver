@@ -23,7 +23,7 @@ ODriveWheelsDriverNode::ODriveWheelsDriverNode() : Node("odrive_wheels_driver_no
   this->declare_parameter("left_scale", 1.0);
   this->declare_parameter("right_scale", 1.0);
   this->declare_parameter("min_effective_vel", 0.0);
-  this->declare_parameter("stiction_torque_ff", 0.08);
+  this->declare_parameter("stiction_torque_ff", 0.03);
   this->declare_parameter("max_wheel_accel", 10.0);
   this->declare_parameter("max_wheel_decel", 10.0);
   this->declare_parameter("zero_vel_epsilon", 0.03);
