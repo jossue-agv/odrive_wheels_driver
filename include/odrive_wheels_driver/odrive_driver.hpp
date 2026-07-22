@@ -19,9 +19,13 @@ struct AxisFeedback {
   uint32_t errors = 0;
   bool encoder_valid = false;
   std::chrono::steady_clock::time_point last_feedback{};
+  std::chrono::steady_clock::time_point last_encoder_feedback{};
 };
 
 struct PollResult {
+  bool frame_received = false;
+  bool encoder_updated = false;
+  uint8_t encoder_node_id = 0;
   bool invalid_encoder_frame = false;
   uint8_t invalid_encoder_node_id = 0;
 };
@@ -38,7 +42,9 @@ public:
   bool connect();
   void disconnect();
   bool is_connected() const;
+  int native_handle() const;
 
+  PollResult poll_one(int timeout_ms);
   PollResult poll();
   void request_encoder_estimates();
   void request_diagnostics();

@@ -1,9 +1,14 @@
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 
 #include "rclcpp/rclcpp.hpp"
+#include "rclcpp/executors/executor_notify_waitable.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/bool.hpp"
@@ -51,6 +56,7 @@ private:
   // -- Standalone driver library --
   std::unique_ptr<ODriveDriver> driver_;
   bool init_driver();
+  bool validate_cyclic_encoder_feedback();
   void read_can_messages();
   void send_velocity(uint8_t node_id, float vel_turns_per_s);
   void send_velocity_with_ff(uint8_t node_id, float vel_turns_per_s, float torque_ff);
@@ -69,17 +75,31 @@ private:
 
   // -- Feedback watchdog --
   int feedback_timeout_ms_;   // 0 disables
-  bool feedback_ok_ = true;
+  bool feedback_ok_ = false;
 
-  void publish_joint_states();
+  void publish_joint_state(uint8_t node_id);
+
+  // -- Event-driven CAN receive --
+  void start_can_event_loop();
+  void stop_can_event_loop();
+  void can_event_loop();
+  void on_can_ready();
+  rclcpp::CallbackGroup::SharedPtr can_callback_group_;
+  rclcpp::GuardCondition::SharedPtr can_guard_condition_;
+  rclcpp::executors::ExecutorNotifyWaitable::SharedPtr can_waitable_;
+  std::thread can_event_thread_;
+  std::atomic<bool> can_event_stop_{false};
+  std::atomic<bool> can_event_error_{false};
+  std::mutex can_event_mutex_;
+  std::condition_variable can_event_cv_;
+  bool can_event_pending_ = false;
+  int can_stop_fd_ = -1;
 
   // -- E-stop --
   bool e_stop_active_ = false;
 
   // -- cmd_vel timeout --
   rclcpp::Time last_cmd_vel_time_;
-
-  int diag_counter_ = 0;
 
   // -- Temperature monitoring --
   void check_temperature(float fet_temp, float motor_temp, int& thermal_level);
@@ -109,11 +129,11 @@ private:
 
   // -- Timers --
   rclcpp::TimerBase::SharedPtr timer_main_;
-  rclcpp::TimerBase::SharedPtr timer_encoder_;
+  rclcpp::TimerBase::SharedPtr timer_diagnostics_;
   rclcpp::TimerBase::SharedPtr timer_motor_state_;
 
   void main_loop();
-  void encoder_request_loop();
+  void diagnostics_request_loop();
 };
 
 }  // namespace odrive_wheels_driver

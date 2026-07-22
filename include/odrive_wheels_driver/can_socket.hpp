@@ -19,6 +19,7 @@ public:
   bool send(uint32_t arb_id, const uint8_t* data, uint8_t dlc);
   bool send_rtr(uint32_t arb_id);
   bool recv(struct can_frame& frame, int timeout_ms);
+  int native_handle() const;
   void close();
 
   void set_filter(uint8_t node_id_1, uint8_t node_id_2);

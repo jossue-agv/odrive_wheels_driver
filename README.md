@@ -53,7 +53,7 @@ ros2 launch odrive_wheels_driver odrive_wheels_driver.launch.py
 ## Dev Tools (Python, in `scripts/` — commissioning only, never in the robot runtime)
 
 - `teleop_keyboard` — Minimal keyboard teleoperation publisher for `cmd_vel`
-- `check_odrive_config` — ODrive S1 tuning config checker (USB)
+- `check_odrive_config` — ODrive S1 tuning and 100 Hz cyclic encoder config checker (USB)
 
 Installed utilities are launched through ROS 2:
 
@@ -66,7 +66,7 @@ ros2 run odrive_wheels_driver check_odrive_config --apply
 ## Topics
 
 **Published:**
-- `joint_states` (sensor_msgs/JointState, 50 Hz) — Wheel angles and velocities after direction and gearbox correction (radians)
+- `joint_states` (sensor_msgs/JointState, event-driven) — One wheel per message, published for every cyclic encoder frame
 - `motor_state` (std_msgs/String, 10 Hz) — JSON: axis state, errors, voltage, temperatures, `feedback_ok`
 
 **Subscribed:**
@@ -84,9 +84,9 @@ ros2 run odrive_wheels_driver check_odrive_config --apply
 | `wheel_radius` | *(required, from geometry config)* | Used only to convert `cmd_vel` to motor turns/s |
 | `track_width` | *(required, from geometry config)* | Used only to split angular velocity between wheels |
 | `gear_ratio` | *(required, from geometry config)* | Motor turns per wheel turn |
-| `publish_rate_hz` | `50` | Main loop frequency |
+| `publish_rate_hz` | `50` | Command shaping and safety loop frequency; does not control encoder publication |
 | `cmd_vel_timeout_ms` | `200` | Stop motors if no `cmd_vel` arrives |
-| `feedback_timeout_ms` | `300` | Feedback watchdog: fault if no heartbeat/encoder frame for this long (0 disables) |
+| `feedback_timeout_ms` | `300` | Per-wheel encoder watchdog; stops and idles both axes when stale (0 disables) |
 | `invert_left` | `true` | Negate left motor direction |
 | `invert_right` | `false` | Negate right motor direction |
 | `left_scale` / `right_scale` | `1.0` | Per-wheel velocity trim |
@@ -98,13 +98,18 @@ ros2 run odrive_wheels_driver check_odrive_config --apply
 
 ## Key Algorithms
 
-- **Feedback watchdog**: Reports motors disarmed and zeroes encoder velocities when heartbeat/encoder feedback expires
+- **Feedback watchdog**: Stops and idles both axes when either encoder stream expires
+- **Encoder feedback**: A SocketCAN event wakes the ROS executor; each `GET_ENCODER_ESTIMATES` frame publishes one wheel without RTR or an encoder timer
 - **Inverse kinematics**: `v_left/right = (linear_x -/+ angular_z * track_width/2) / (wheel_radius * 2pi) * gear_ratio`
 - **Wheel shaping pipeline**: Zero bypass -> asymmetric accel/decel limiter -> stiction compensation -> torque feedforward
 - **CAN protocol**: Arbitration ID = `(node_id << 5) | cmd_id`, commands: HEARTBEAT, GET_ENCODER_ESTIMATES, SET_INPUT_VEL, SET_AXIS_STATE, GET_TEMPERATURE, GET_VBUS_VOLTAGE
 
 ## Configuration
 
+- Each ODrive must have a unique `axis0.config.can.node_id` in `0..62`.
+- Set `axis0.config.can.encoder_msg_rate_ms = 10` and persist it with
+  `save_configuration()`. The node refuses to arm unless both cyclic streams
+  are observed during startup.
 - `config/odrive_params.yaml` — All parameters above
 - `launch/odrive_wheels_driver.launch.py` — Supports namespace, params_file, cmd_vel_topic remapping
 
@@ -116,6 +121,6 @@ ros2 run odrive_wheels_driver check_odrive_config --apply
 
 - Enable and validate the ODrive firmware axis watchdog (`axis.config.enable_watchdog`)
   so a host crash disarms the motors controller-side (needs hardware validation)
-- Add integration test with mock CAN socket (RTR-frame regression test)
+- Add integration test with mock CAN socket (cyclic encoder-feedback regression test)
 - Add docstrings to Python dev tools
 - Validate gear_ratio against ODrive firmware config to prevent silent misconfiguration

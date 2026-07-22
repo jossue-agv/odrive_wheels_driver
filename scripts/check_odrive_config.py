@@ -35,6 +35,7 @@ TARGETS = {
     "controller.config.vel_ramp_rate":          0.5,
     "controller.config.vel_limit":              10.0,
     "controller.config.input_mode":             1,    # INPUT_MODE_PASSTHROUGH
+    "config.can.encoder_msg_rate_ms":           10,   # cyclic encoder feedback at 100 Hz
     "motor.motor_thermistor.config.enabled":    False,
 }
 
@@ -83,6 +84,19 @@ def check_axis(axis, axis_label: str, apply: bool) -> int:
         if not ok:
             mismatches += 1
 
+    try:
+        node_id = int(get_nested(axis, "config.can.node_id"))
+        node_id_ok = node_id != 0x3F
+        rows.append((
+            "config.can.node_id", node_id, "0..62",
+            "OK" if node_id_ok else "MANUAL",
+        ))
+        if not node_id_ok:
+            mismatches += 1
+    except AttributeError as e:
+        rows.append(("config.can.node_id", "N/A", "0..62", f"ATTRIBUTE ERROR: {e}"))
+        mismatches += 1
+
     print(f"\n--- {axis_label} ---")
     print(f"  {'Parameter':<48} {'Actual':>10}  {'Target':>10}  Status")
     print(f"  {'-'*48} {'-'*10}  {'-'*10}  ------")
@@ -93,7 +107,9 @@ def check_axis(axis, axis_label: str, apply: bool) -> int:
     if apply and mismatches > 0:
         print(f"\n  Applying {mismatches} change(s)...")
         for path, actual, target, status in rows:
-            if status == "MISMATCH":
+            if status == "MANUAL":
+                print("    ERROR: assign a unique CAN node_id in range 0..62")
+            elif status == "MISMATCH":
                 try:
                     set_nested(axis, path, target)
                     print(f"    SET {path} = {target}")
@@ -155,7 +171,8 @@ def main():
     if total_mismatches == 0:
         print("All parameters match targets. No changes needed.")
     elif args.apply:
-        print(f"Applied {total_mismatches} change(s) and saved. Reconnect ODrives after reboot.")
+        print(f"Processed {total_mismatches} mismatch(es) and saved writable settings.")
+        print("Reconnect ODrives, then run again without --apply to verify.")
     else:
         print(f"Found {total_mismatches} mismatch(es). Re-run with --apply to write changes.")
 

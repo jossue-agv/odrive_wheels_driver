@@ -30,6 +30,8 @@ bool ODriveDriver::connect() {
   const auto now = std::chrono::steady_clock::now();
   left_.last_feedback = now;
   right_.last_feedback = now;
+  left_.last_encoder_feedback = now;
+  right_.last_encoder_feedback = now;
   left_.encoder_valid = false;
   right_.encoder_valid = false;
   consecutive_send_failures_ = 0;
@@ -47,6 +49,10 @@ bool ODriveDriver::is_connected() const {
   return can_ && can_->is_open();
 }
 
+int ODriveDriver::native_handle() const {
+  return is_connected() ? can_->native_handle() : -1;
+}
+
 AxisFeedback* ODriveDriver::axis_for(uint8_t node_id) {
   if (node_id == left_axis_id_) {
     return &left_;
@@ -57,77 +63,104 @@ AxisFeedback* ODriveDriver::axis_for(uint8_t node_id) {
   return nullptr;
 }
 
-PollResult ODriveDriver::poll() {
+PollResult ODriveDriver::poll_one(int timeout_ms) {
   PollResult result;
   if (!is_connected()) {
     return result;
   }
 
   struct can_frame frame {};
-  while (can_->recv(frame, 1)) {
-    if (frame.can_id & CAN_RTR_FLAG) {
-      continue;
-    }
+  if (!can_->recv(frame, timeout_ms)) {
+    return result;
+  }
+  result.frame_received = true;
 
-    const auto arbitration_id = frame.can_id & CAN_SFF_MASK;
-    const uint8_t node_id = get_node_id(arbitration_id);
-    const uint8_t command_id = get_cmd_id(arbitration_id);
-    AxisFeedback* axis = axis_for(node_id);
-    if (!axis) {
-      continue;
-    }
+  if (frame.can_id & CAN_RTR_FLAG) {
+    return result;
+  }
 
-    switch (command_id) {
-      case cmd::HEARTBEAT: {
-        if (frame.can_dlc < 7) {
-          break;
-        }
-        const auto heartbeat = HeartbeatMsg::parse(frame.data);
-        axis->state = heartbeat.axis_state;
-        axis->errors = heartbeat.active_errors;
-        axis->last_feedback = std::chrono::steady_clock::now();
+  const auto arbitration_id = frame.can_id & CAN_SFF_MASK;
+  const uint8_t node_id = get_node_id(arbitration_id);
+  const uint8_t command_id = get_cmd_id(arbitration_id);
+  AxisFeedback* axis = axis_for(node_id);
+  if (!axis) {
+    return result;
+  }
+
+  switch (command_id) {
+    case cmd::HEARTBEAT: {
+      if (frame.can_dlc < 7) {
         break;
       }
-      case cmd::GET_ENCODER_ESTIMATES: {
-        if (frame.can_dlc < 8) {
-          break;
-        }
-        const auto encoder = EncoderMsg::parse(frame.data);
-        if (!encoder.valid) {
-          result.invalid_encoder_frame = true;
-          result.invalid_encoder_node_id = node_id;
-          break;
-        }
-        axis->position_turns = encoder.position;
-        axis->velocity_turns_per_s = encoder.velocity;
-        axis->encoder_valid = true;
-        axis->last_feedback = std::chrono::steady_clock::now();
-        break;
-      }
-      case cmd::GET_TEMPERATURE: {
-        if (frame.can_dlc < 8) {
-          break;
-        }
-        const auto temperature = TemperatureMsg::parse(frame.data);
-        axis->fet_temperature = temperature.fet_temperature;
-        axis->motor_temperature = temperature.motor_temperature;
-        break;
-      }
-      case cmd::GET_VBUS_VOLTAGE: {
-        if (frame.can_dlc < 8) {
-          break;
-        }
-        const auto bus = VbusMsg::parse(frame.data);
-        bus_voltage_ = bus.voltage;
-        bus_current_ = bus.current;
-        break;
-      }
-      default:
-        break;
+      const auto heartbeat = HeartbeatMsg::parse(frame.data);
+      axis->state = heartbeat.axis_state;
+      axis->errors = heartbeat.active_errors;
+      axis->last_feedback = std::chrono::steady_clock::now();
+      break;
     }
+    case cmd::GET_ENCODER_ESTIMATES: {
+      if (frame.can_dlc < 8) {
+        break;
+      }
+      const auto encoder = EncoderMsg::parse(frame.data);
+      if (!encoder.valid) {
+        result.invalid_encoder_frame = true;
+        result.invalid_encoder_node_id = node_id;
+        break;
+      }
+      const auto now = std::chrono::steady_clock::now();
+      axis->position_turns = encoder.position;
+      axis->velocity_turns_per_s = encoder.velocity;
+      axis->encoder_valid = true;
+      axis->last_feedback = now;
+      axis->last_encoder_feedback = now;
+      result.encoder_updated = true;
+      result.encoder_node_id = node_id;
+      break;
+    }
+    case cmd::GET_TEMPERATURE: {
+      if (frame.can_dlc < 8) {
+        break;
+      }
+      const auto temperature = TemperatureMsg::parse(frame.data);
+      axis->fet_temperature = temperature.fet_temperature;
+      axis->motor_temperature = temperature.motor_temperature;
+      break;
+    }
+    case cmd::GET_VBUS_VOLTAGE: {
+      if (frame.can_dlc < 8) {
+        break;
+      }
+      const auto bus = VbusMsg::parse(frame.data);
+      bus_voltage_ = bus.voltage;
+      bus_current_ = bus.current;
+      break;
+    }
+    default:
+      break;
   }
 
   return result;
+}
+
+PollResult ODriveDriver::poll() {
+  PollResult aggregate;
+  while (true) {
+    const auto result = poll_one(1);
+    if (!result.frame_received) {
+      break;
+    }
+    aggregate.frame_received = true;
+    if (result.encoder_updated) {
+      aggregate.encoder_updated = true;
+      aggregate.encoder_node_id = result.encoder_node_id;
+    }
+    if (result.invalid_encoder_frame) {
+      aggregate.invalid_encoder_frame = true;
+      aggregate.invalid_encoder_node_id = result.invalid_encoder_node_id;
+    }
+  }
+  return aggregate;
 }
 
 void ODriveDriver::request_encoder_estimates() {

@@ -81,6 +81,10 @@ bool CANSocket::recv(struct can_frame& frame, int timeout_ms) {
   return nbytes == sizeof(frame);
 }
 
+int CANSocket::native_handle() const {
+  return fd_;
+}
+
 void CANSocket::close() {
   if (fd_ >= 0) {
     ::close(fd_);
