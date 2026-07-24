@@ -8,7 +8,7 @@
 #include <thread>
 
 #include "rclcpp/rclcpp.hpp"
-#include "rclcpp/executors/executor_notify_waitable.hpp"
+#include "rclcpp/waitable.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/bool.hpp"
@@ -86,7 +86,7 @@ private:
   void on_can_ready();
   rclcpp::CallbackGroup::SharedPtr can_callback_group_;
   rclcpp::GuardCondition::SharedPtr can_guard_condition_;
-  rclcpp::executors::ExecutorNotifyWaitable::SharedPtr can_waitable_;
+  rclcpp::Waitable::SharedPtr can_waitable_;
   std::thread can_event_thread_;
   std::atomic<bool> can_event_stop_{false};
   std::atomic<bool> can_event_error_{false};

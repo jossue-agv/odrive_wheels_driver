@@ -4,14 +4,68 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <stdexcept>
+#include <utility>
 
 #include <poll.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
 
+#include "rclcpp/exceptions.hpp"
+
 #include "odrive_wheels_driver/kinematics.hpp"
+
+namespace {
+
+class GuardConditionCallbackWaitable : public rclcpp::Waitable {
+public:
+  GuardConditionCallbackWaitable(
+      rclcpp::GuardCondition::SharedPtr guard_condition,
+      std::function<void()> callback)
+      : guard_condition_(std::move(guard_condition)),
+        callback_(std::move(callback)) {}
+
+  size_t get_number_of_ready_guard_conditions() override {
+    return 1U;
+  }
+
+  void add_to_wait_set(rcl_wait_set_t* wait_set) override {
+    const rcl_ret_t result = rcl_wait_set_add_guard_condition(
+      wait_set, &guard_condition_->get_rcl_guard_condition(), nullptr);
+    if (result != RCL_RET_OK) {
+      rclcpp::exceptions::throw_from_rcl_error(
+        result, "failed to add CAN guard condition to wait set");
+    }
+  }
+
+  bool is_ready(rcl_wait_set_t* wait_set) override {
+    const auto* guard_condition =
+      &guard_condition_->get_rcl_guard_condition();
+    for (size_t index = 0; index < wait_set->size_of_guard_conditions; ++index) {
+      if (wait_set->guard_conditions[index] == guard_condition) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  std::shared_ptr<void> take_data() override {
+    return nullptr;
+  }
+
+  void execute(std::shared_ptr<void>& data) override {
+    (void)data;
+    callback_();
+  }
+
+private:
+  rclcpp::GuardCondition::SharedPtr guard_condition_;
+  std::function<void()> callback_;
+};
+
+}  // namespace
 
 namespace odrive_wheels_driver {
 
@@ -355,9 +409,9 @@ void ODriveWheelsDriverNode::start_can_event_loop() {
   can_guard_condition_ = std::make_shared<rclcpp::GuardCondition>(
     this->get_node_base_interface()->get_context());
   can_waitable_ =
-    std::make_shared<rclcpp::executors::ExecutorNotifyWaitable>(
+    std::make_shared<GuardConditionCallbackWaitable>(
+      can_guard_condition_,
       std::bind(&ODriveWheelsDriverNode::on_can_ready, this));
-  can_waitable_->add_guard_condition(can_guard_condition_);
   this->get_node_waitables_interface()->add_waitable(
     can_waitable_, can_callback_group_);
 
