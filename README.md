@@ -86,7 +86,7 @@ ros2 run odrive_wheels_driver check_odrive_config --apply
 | `gear_ratio` | *(required, from geometry config)* | Motor turns per wheel turn |
 | `publish_rate_hz` | `50` | Command shaping and safety loop frequency; does not control encoder publication |
 | `cmd_vel_timeout_ms` | `200` | Stop motors if no `cmd_vel` arrives |
-| `feedback_timeout_ms` | `300` | Per-wheel encoder watchdog; stops and idles both axes when stale (0 disables) |
+| `feedback_timeout_ms` | `500` | Per-wheel encoder watchdog; stops and idles both axes when stale (0 disables) |
 | `invert_left` | `true` | Negate left motor direction |
 | `invert_right` | `false` | Negate right motor direction |
 | `left_scale` / `right_scale` | `1.0` | Per-wheel velocity trim |

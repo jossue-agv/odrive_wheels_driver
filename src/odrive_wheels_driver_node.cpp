@@ -98,8 +98,8 @@ ODriveWheelsDriverNode::ODriveWheelsDriverNode() : Node("odrive_wheels_driver_no
   this->declare_parameter("max_motor_temp", 80.0);
   this->declare_parameter("critical_temp_offset", 10.0);
   // Feedback watchdog: fault if no heartbeat/encoder frame arrives within this
-  // window (ODrive heartbeat period is 100 ms → default = 3 missed). 0 disables.
-  this->declare_parameter("feedback_timeout_ms", 300);
+  // window (ODrive heartbeat period is 100 ms → default = 5 missed). 0 disables.
+  this->declare_parameter("feedback_timeout_ms", 500);
 
   // -- Read parameters --
   can_interface_ = this->get_parameter("can_interface").as_string();
