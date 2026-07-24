@@ -72,4 +72,14 @@ install(PROGRAMS
   RENAME check_odrive_config
 )
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_latest_event_mailbox
+    test/test_latest_event_mailbox.cpp
+  )
+  target_include_directories(test_latest_event_mailbox PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+endif()
+
 ament_package()

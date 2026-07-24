@@ -13,59 +13,7 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 
-#include "rclcpp/exceptions.hpp"
-
 #include "odrive_wheels_driver/kinematics.hpp"
-
-namespace {
-
-class GuardConditionCallbackWaitable : public rclcpp::Waitable {
-public:
-  GuardConditionCallbackWaitable(
-      rclcpp::GuardCondition::SharedPtr guard_condition,
-      std::function<void()> callback)
-      : guard_condition_(std::move(guard_condition)),
-        callback_(std::move(callback)) {}
-
-  size_t get_number_of_ready_guard_conditions() override {
-    return 1U;
-  }
-
-  void add_to_wait_set(rcl_wait_set_t* wait_set) override {
-    const rcl_ret_t result = rcl_wait_set_add_guard_condition(
-      wait_set, &guard_condition_->get_rcl_guard_condition(), nullptr);
-    if (result != RCL_RET_OK) {
-      rclcpp::exceptions::throw_from_rcl_error(
-        result, "failed to add CAN guard condition to wait set");
-    }
-  }
-
-  bool is_ready(rcl_wait_set_t* wait_set) override {
-    const auto* guard_condition =
-      &guard_condition_->get_rcl_guard_condition();
-    for (size_t index = 0; index < wait_set->size_of_guard_conditions; ++index) {
-      if (wait_set->guard_conditions[index] == guard_condition) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  std::shared_ptr<void> take_data() override {
-    return nullptr;
-  }
-
-  void execute(std::shared_ptr<void>& data) override {
-    (void)data;
-    callback_();
-  }
-
-private:
-  rclcpp::GuardCondition::SharedPtr guard_condition_;
-  std::function<void()> callback_;
-};
-
-}  // namespace
 
 namespace odrive_wheels_driver {
 
@@ -211,13 +159,13 @@ ODriveWheelsDriverNode::ODriveWheelsDriverNode() : Node("odrive_wheels_driver_no
               invert_left_ ? "true" : "false", invert_right_ ? "true" : "false");
 
   if (driver_->is_connected()) {
-    start_can_event_loop();
+    start_can_workers();
   }
 }
 
 ODriveWheelsDriverNode::~ODriveWheelsDriverNode() {
-  stop_can_event_loop();
   stop_motors();
+  stop_can_workers();
 }
 
 bool ODriveWheelsDriverNode::is_can_connected() const {
@@ -387,157 +335,209 @@ void ODriveWheelsDriverNode::check_temperature(
   }
 }
 
-// ── Event-driven CAN receive ──
+// ── Event-driven CAN receive and latest-value ROS publication ──
 
-void ODriveWheelsDriverNode::start_can_event_loop() {
-  if (can_event_thread_.joinable()) {
+void ODriveWheelsDriverNode::start_can_workers() {
+  if (can_receive_thread_.joinable() || can_publish_thread_.joinable()) {
     return;
   }
 
   const int can_fd = driver_->native_handle();
   if (can_fd < 0) {
-    throw std::runtime_error("Cannot start CAN event loop without an open socket");
+    throw std::runtime_error("Cannot start CAN workers without an open socket");
   }
 
   can_stop_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   if (can_stop_fd_ < 0) {
-    throw std::runtime_error("Failed to create CAN event-loop stop descriptor");
+    throw std::runtime_error("Failed to create CAN worker stop descriptor");
   }
 
-  can_callback_group_ = this->create_callback_group(
-    rclcpp::CallbackGroupType::MutuallyExclusive);
-  can_guard_condition_ = std::make_shared<rclcpp::GuardCondition>(
-    this->get_node_base_interface()->get_context());
-  can_waitable_ =
-    std::make_shared<GuardConditionCallbackWaitable>(
-      can_guard_condition_,
-      std::bind(&ODriveWheelsDriverNode::on_can_ready, this));
-  this->get_node_waitables_interface()->add_waitable(
-    can_waitable_, can_callback_group_);
+  encoder_mailbox_.clear();
+  can_workers_stop_.store(false);
+  can_receive_error_.store(false);
+  invalid_encoder_node_id_.store(-1);
 
-  can_event_stop_.store(false);
-  can_event_error_.store(false);
-  can_event_thread_ = std::thread(
-    &ODriveWheelsDriverNode::can_event_loop, this);
-  RCLCPP_INFO(get_logger(), "SocketCAN receive is event-driven (no encoder timer)");
+  can_publish_thread_ = std::thread(
+    &ODriveWheelsDriverNode::can_publish_loop, this);
+  can_receive_thread_ = std::thread(
+    &ODriveWheelsDriverNode::can_receive_loop, this);
+  RCLCPP_INFO(
+    get_logger(),
+    "SocketCAN RX never waits for ROS; publisher sends latest wheel samples");
 }
 
-void ODriveWheelsDriverNode::stop_can_event_loop() {
-  can_event_stop_.store(true);
+void ODriveWheelsDriverNode::stop_can_workers() {
+  can_workers_stop_.store(true);
   if (can_stop_fd_ >= 0) {
     const uint64_t value = 1;
     const auto written = ::write(can_stop_fd_, &value, sizeof(value));
     (void)written;
   }
+  encoder_mailbox_.notify_all();
 
-  {
-    std::lock_guard<std::mutex> lock(can_event_mutex_);
-    can_event_pending_ = false;
+  if (can_receive_thread_.joinable()) {
+    can_receive_thread_.join();
   }
-  can_event_cv_.notify_all();
-
-  if (can_event_thread_.joinable()) {
-    can_event_thread_.join();
+  if (can_publish_thread_.joinable()) {
+    can_publish_thread_.join();
   }
   if (can_stop_fd_ >= 0) {
     ::close(can_stop_fd_);
     can_stop_fd_ = -1;
   }
+  encoder_mailbox_.clear();
 }
 
-void ODriveWheelsDriverNode::can_event_loop() {
+bool ODriveWheelsDriverNode::store_encoder_publication(
+    EncoderPublication sample) {
+  std::size_t slot = 0U;
+  if (sample.node_id == left_axis_id_) {
+    slot = kLeftEncoderSlot;
+  } else if (sample.node_id == right_axis_id_) {
+    slot = kRightEncoderSlot;
+  } else {
+    return false;
+  }
+  return encoder_mailbox_.store(slot, std::move(sample));
+}
+
+void ODriveWheelsDriverNode::can_receive_loop() {
   struct pollfd descriptors[2] {};
   descriptors[0].fd = driver_->native_handle();
   descriptors[0].events = POLLIN;
   descriptors[1].fd = can_stop_fd_;
   descriptors[1].events = POLLIN;
 
-  while (!can_event_stop_.load()) {
+  while (!can_workers_stop_.load()) {
     const int result = ::poll(descriptors, 2, -1);
     if (result < 0) {
       if (errno == EINTR) {
         continue;
       }
-      can_event_error_.store(true);
-      can_guard_condition_->trigger();
+      can_receive_error_.store(true);
       break;
     }
-    if ((descriptors[1].revents & POLLIN) != 0 || can_event_stop_.load()) {
+    if ((descriptors[1].revents & POLLIN) != 0 || can_workers_stop_.load()) {
       break;
     }
     if ((descriptors[0].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
-      can_event_error_.store(true);
-      can_guard_condition_->trigger();
+      can_receive_error_.store(true);
       break;
     }
     if ((descriptors[0].revents & POLLIN) == 0) {
       continue;
     }
 
-    std::unique_lock<std::mutex> lock(can_event_mutex_);
-    can_event_pending_ = true;
-    can_guard_condition_->trigger();
-    can_event_cv_.wait(lock, [this]() {
-      return !can_event_pending_ || can_event_stop_.load();
-    });
+    while (!can_workers_stop_.load()) {
+      const auto poll_result = driver_->poll_one(0);
+      if (!poll_result.frame_received) {
+        break;
+      }
+      if (poll_result.invalid_encoder_frame) {
+        invalid_encoder_node_id_.store(
+          static_cast<int>(poll_result.invalid_encoder_node_id));
+      }
+      if (poll_result.encoder_updated) {
+        store_encoder_publication(EncoderPublication{
+          poll_result.encoder_node_id,
+          poll_result.encoder_position_turns,
+          poll_result.encoder_velocity_turns_per_s,
+          this->get_clock()->now()});
+      }
+    }
   }
 }
 
-void ODriveWheelsDriverNode::on_can_ready() {
-  if (can_event_error_.exchange(false)) {
-    RCLCPP_ERROR(get_logger(), "SocketCAN receive event loop failed");
+void ODriveWheelsDriverNode::can_publish_loop() {
+  EncoderPublication sample;
+  while (encoder_mailbox_.wait_take(sample, can_workers_stop_)) {
+    publish_joint_state(sample);
   }
-
-  read_can_messages();
-
-  {
-    std::lock_guard<std::mutex> lock(can_event_mutex_);
-    can_event_pending_ = false;
-  }
-  can_event_cv_.notify_one();
 }
 
 // ── Main loop (50 Hz) ──
 
 void ODriveWheelsDriverNode::main_loop() {
-  // Retry CAN with exponential backoff
+  if (can_receive_error_.exchange(false)) {
+    RCLCPP_ERROR(
+      get_logger(),
+      "SocketCAN receive worker failed — stopping motors and reconnecting");
+    feedback_ok_ = false;
+    reset_motion_targets();
+    stop_motors();
+    stop_can_workers();
+    driver_->disconnect();
+    last_can_retry_ = this->now();
+    return;
+  }
+
+  // Retry CAN with exponential backoff.
   if (!driver_->is_connected()) {
-    auto now = this->now();
-    auto elapsed = (now - last_can_retry_).nanoseconds() / 1000000;
-    if (elapsed < can_retry_delay_ms_) return;
+    const auto now = this->now();
+    const auto elapsed = (now - last_can_retry_).nanoseconds() / 1000000;
+    if (elapsed < can_retry_delay_ms_) {
+      return;
+    }
     last_can_retry_ = now;
     if (!init_driver()) {
       can_retry_delay_ms_ = std::min(can_retry_delay_ms_ * 2, 3000);
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
         "CAN init failed on %s, next retry in %dms",
         can_interface_.c_str(), can_retry_delay_ms_);
       return;
     }
-    RCLCPP_INFO(get_logger(), "CAN connection restored on %s", can_interface_.c_str());
+    start_can_workers();
+    RCLCPP_INFO(
+      get_logger(), "CAN connection restored on %s", can_interface_.c_str());
     can_retry_delay_ms_ = 100;
   }
 
-  // Feedback watchdog uses encoder freshness per wheel. A SocketCAN fd stays "open"
-  // when the interface drops or the ODrive powers off, so socket state alone
-  // cannot detect a dead bus — frame freshness can.
+  const int invalid_node = invalid_encoder_node_id_.exchange(-1);
+  if (invalid_node >= 0) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "ODrive node %d: NaN/Inf in encoder feedback — ignoring", invalid_node);
+  }
+
+  const auto feedback = driver_->feedback_snapshot();
+  if (feedback.left.errors != 0) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "ODrive node %d errors: 0x%08X", left_axis_id_, feedback.left.errors);
+  }
+  if (feedback.right.errors != 0) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "ODrive node %d errors: 0x%08X", right_axis_id_, feedback.right.errors);
+  }
+  check_temperature(
+    feedback.left.fet_temperature, feedback.left.motor_temperature,
+    left_thermal_level_);
+  check_temperature(
+    feedback.right.fet_temperature, feedback.right.motor_temperature,
+    right_thermal_level_);
+
+  // Feedback watchdog uses encoder freshness per wheel. A SocketCAN fd stays
+  // open when the interface drops or an ODrive powers off, so freshness is the
+  // transport health signal.
   if (feedback_timeout_ms_ > 0) {
     const auto fb_now = std::chrono::steady_clock::now();
     const auto left_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-      fb_now - driver_->left().last_encoder_feedback).count();
+      fb_now - feedback.left.last_encoder_feedback).count();
     const auto right_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-      fb_now - driver_->right().last_encoder_feedback).count();
-    const bool stale = left_age_ms > feedback_timeout_ms_ || right_age_ms > feedback_timeout_ms_;
+      fb_now - feedback.right.last_encoder_feedback).count();
+    const bool stale =
+      left_age_ms > feedback_timeout_ms_ || right_age_ms > feedback_timeout_ms_;
     if (stale && feedback_ok_) {
       feedback_ok_ = false;
-      target_left_turns_ = 0.0f;
-      target_right_turns_ = 0.0f;
-      left_prev_cmd_ = 0.0f;
-      right_prev_cmd_ = 0.0f;
-      RCLCPP_ERROR(get_logger(),
+      reset_motion_targets();
+      RCLCPP_ERROR(
+        get_logger(),
         "ODrive encoder feedback lost (left %lld ms, right %lld ms > %d ms) — "
         "stopping and idling both axes",
-        static_cast<long long>(left_age_ms), static_cast<long long>(right_age_ms),
-        feedback_timeout_ms_);
+        static_cast<long long>(left_age_ms),
+        static_cast<long long>(right_age_ms), feedback_timeout_ms_);
       stop_motors();
     } else if (!stale && !feedback_ok_) {
       feedback_ok_ = true;
@@ -545,8 +545,9 @@ void ODriveWheelsDriverNode::main_loop() {
     }
   }
 
-  // cmd_vel timeout: stop if no command received recently
-  auto elapsed_ms = (this->now() - last_cmd_vel_time_).nanoseconds() / 1000000;
+  // cmd_vel timeout: stop if no command received recently.
+  const auto elapsed_ms =
+    (this->now() - last_cmd_vel_time_).nanoseconds() / 1000000;
   if (elapsed_ms > cmd_vel_timeout_ms_ && !e_stop_active_) {
     target_left_turns_ = 0.0f;
     target_right_turns_ = 0.0f;
@@ -561,13 +562,18 @@ void ODriveWheelsDriverNode::main_loop() {
     const float right_cmd = apply_wheel_shaping(
       target_right_turns_, right_prev_cmd_, right_sign_ * right_scale_, loop_dt);
     const float left_ff =
-      (std::abs(left_cmd) > 0.001f) ? std::copysign(stiction_torque_ff_, left_cmd) : 0.0f;
+      (std::abs(left_cmd) > 0.001f) ?
+      std::copysign(stiction_torque_ff_, left_cmd) : 0.0f;
     const float right_ff =
-      (std::abs(right_cmd) > 0.001f) ? std::copysign(stiction_torque_ff_, right_cmd) : 0.0f;
+      (std::abs(right_cmd) > 0.001f) ?
+      std::copysign(stiction_torque_ff_, right_cmd) : 0.0f;
 
-    RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 500,
-      "CAN loop command: target=(%.4f, %.4f) sent=(%.4f, %.4f) torque_ff=(%.4f, %.4f)",
-      static_cast<double>(target_left_turns_), static_cast<double>(target_right_turns_),
+    RCLCPP_DEBUG_THROTTLE(
+      get_logger(), *get_clock(), 500,
+      "CAN loop command: target=(%.4f, %.4f) sent=(%.4f, %.4f) "
+      "torque_ff=(%.4f, %.4f)",
+      static_cast<double>(target_left_turns_),
+      static_cast<double>(target_right_turns_),
       static_cast<double>(left_cmd), static_cast<double>(right_cmd),
       static_cast<double>(left_ff), static_cast<double>(right_ff));
 
@@ -584,75 +590,36 @@ void ODriveWheelsDriverNode::diagnostics_request_loop() {
   driver_->request_diagnostics();
 }
 
-// ── Read CAN messages ──
-
-void ODriveWheelsDriverNode::read_can_messages() {
-  while (true) {
-    const auto result = driver_->poll_one(0);
-    if (!result.frame_received) {
-      break;
-    }
-    if (result.invalid_encoder_frame) {
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-        "ODrive node %d: NaN/Inf in encoder feedback — ignoring",
-        result.invalid_encoder_node_id);
-    }
-    if (result.encoder_updated) {
-      publish_joint_state(result.encoder_node_id);
-    }
-  }
-
-  const auto& left = driver_->left();
-  const auto& right = driver_->right();
-  if (left.errors != 0) {
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
-      "ODrive node %d errors: 0x%08X", left_axis_id_, left.errors);
-  }
-  if (right.errors != 0) {
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
-      "ODrive node %d errors: 0x%08X", right_axis_id_, right.errors);
-  }
-
-  check_temperature(
-    left.fet_temperature, left.motor_temperature, left_thermal_level_);
-  check_temperature(
-    right.fet_temperature, right.motor_temperature, right_thermal_level_);
-}
-
 // ── Publish one wheel sample per encoder frame ──
 
-void ODriveWheelsDriverNode::publish_joint_state(uint8_t node_id) {
-  const AxisFeedback* feedback = nullptr;
+void ODriveWheelsDriverNode::publish_joint_state(
+    const EncoderPublication& sample) {
   const char* joint_name = nullptr;
   double direction = 1.0;
 
-  if (node_id == left_axis_id_) {
-    feedback = &driver_->left();
+  if (sample.node_id == left_axis_id_) {
     joint_name = "left_wheel_joint";
     direction = left_sign_;
-  } else if (node_id == right_axis_id_) {
-    feedback = &driver_->right();
+  } else if (sample.node_id == right_axis_id_) {
     joint_name = "right_wheel_joint";
     direction = right_sign_;
-  }
-
-  if (feedback == nullptr || !feedback->encoder_valid) {
+  } else {
     return;
   }
 
   sensor_msgs::msg::JointState msg;
-  msg.header.stamp = this->now();
+  msg.header.stamp = sample.stamp;
   msg.name = {joint_name};
 
   // ODrive reports motor turns. JointState represents wheel radians after
   // direction correction and gearbox reduction.
   msg.position = {
     kinematics::motor_turns_to_wheel_radians(
-      feedback->position_turns * direction, gear_ratio_)
+      sample.position_turns * direction, gear_ratio_)
   };
   msg.velocity = {
     kinematics::motor_turns_to_wheel_radians(
-      feedback->velocity_turns_per_s * direction, gear_ratio_)
+      sample.velocity_turns_per_s * direction, gear_ratio_)
   };
 
   pub_joint_->publish(msg);
@@ -669,15 +636,15 @@ void ODriveWheelsDriverNode::on_cmd_vel(const geometry_msgs::msg::Twist& msg) {
     return;
   }
   if (!motors_armed()) {
-    const auto& left = driver_->left();
-    const auto& right = driver_->right();
+    const auto feedback = driver_->feedback_snapshot();
     RCLCPP_DEBUG(get_logger(),
       "cmd_vel ignored: motors not armed or feedback stale "
       "(left_state=%d right_state=%d feedback_ok=%s)",
-      left.state, right.state, feedback_ok_ ? "true" : "false");
+      feedback.left.state, feedback.right.state,
+      feedback_ok_ ? "true" : "false");
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 3000,
       "cmd_vel received but motors not armed (left=%d, right=%d)",
-      left.state, right.state);
+      feedback.left.state, feedback.right.state);
     return;
   }
 
@@ -718,10 +685,7 @@ void ODriveWheelsDriverNode::on_e_stop(const std_msgs::msg::Bool& msg) {
   if (msg.data && !e_stop_active_) {
     RCLCPP_WARN(get_logger(), "E-STOP ACTIVATED");
     e_stop_active_ = true;
-    target_left_turns_ = 0.0f;
-    target_right_turns_ = 0.0f;
-    left_prev_cmd_ = 0.0f;
-    right_prev_cmd_ = 0.0f;
+    reset_motion_targets();
     send_velocity(left_axis_id_, 0.0f);
     send_velocity(right_axis_id_, 0.0f);
   } else if (!msg.data && e_stop_active_) {
@@ -829,21 +793,51 @@ void ODriveWheelsDriverNode::stop_motors() {
   send_axis_state(right_axis_id_, AxisState::IDLE);
 }
 
+void ODriveWheelsDriverNode::reset_motion_targets() {
+  target_left_turns_ = 0.0f;
+  target_right_turns_ = 0.0f;
+  left_prev_cmd_ = 0.0f;
+  right_prev_cmd_ = 0.0f;
+}
+
 // ── Motor readiness ──
 
+bool ODriveWheelsDriverNode::feedback_is_fresh(
+    const DriverFeedbackSnapshot& feedback) const {
+  if (!feedback.left.encoder_valid || !feedback.right.encoder_valid) {
+    return false;
+  }
+  if (feedback_timeout_ms_ == 0) {
+    return true;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  const auto left_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+    now - feedback.left.last_encoder_feedback).count();
+  const auto right_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+    now - feedback.right.last_encoder_feedback).count();
+  return left_age_ms <= feedback_timeout_ms_ &&
+         right_age_ms <= feedback_timeout_ms_;
+}
+
 bool ODriveWheelsDriverNode::motors_armed() const {
-  // Stale feedback means the axis states are unknown — report disarmed so
-  // cmd_vel is not forwarded into a dead bus and the operator sees the fault.
-  const auto& left = driver_->left();
-  const auto& right = driver_->right();
+  // Stale feedback means the axis states are not safe for motion commands.
+  const auto feedback = driver_->feedback_snapshot();
   return feedback_ok_ &&
-         left.state == static_cast<uint8_t>(AxisState::CLOSED_LOOP_CONTROL) &&
-         right.state == static_cast<uint8_t>(AxisState::CLOSED_LOOP_CONTROL);
+         feedback.left.state ==
+           static_cast<uint8_t>(AxisState::CLOSED_LOOP_CONTROL) &&
+         feedback.right.state ==
+           static_cast<uint8_t>(AxisState::CLOSED_LOOP_CONTROL);
 }
 
 void ODriveWheelsDriverNode::publish_motor_state() {
-  const auto& left = driver_->left();
-  const auto& right = driver_->right();
+  const auto feedback = driver_->feedback_snapshot();
+  const bool armed =
+    feedback_ok_ &&
+    feedback.left.state ==
+      static_cast<uint8_t>(AxisState::CLOSED_LOOP_CONTROL) &&
+    feedback.right.state ==
+      static_cast<uint8_t>(AxisState::CLOSED_LOOP_CONTROL);
+
   std_msgs::msg::String msg;
   char buf[512];
   std::snprintf(buf, sizeof(buf),
@@ -852,13 +846,15 @@ void ODriveWheelsDriverNode::publish_motor_state() {
     R"("left_fet_temp":%.1f,"left_motor_temp":%.1f,)"
     R"("right_fet_temp":%.1f,"right_motor_temp":%.1f,)"
     R"("feedback_ok":%s,"thermal_state":"%s"})",
-    left.state, right.state, left.errors, right.errors,
-    motors_armed() ? "true" : "false",
-    driver_->bus_voltage(), driver_->bus_current(),
-    static_cast<double>(left.fet_temperature), static_cast<double>(left.motor_temperature),
-    static_cast<double>(right.fet_temperature), static_cast<double>(right.motor_temperature),
-    feedback_ok_ ? "true" : "false",
-    thermal_state_.c_str());
+    feedback.left.state, feedback.right.state,
+    feedback.left.errors, feedback.right.errors,
+    armed ? "true" : "false",
+    feedback.bus_voltage, feedback.bus_current,
+    static_cast<double>(feedback.left.fet_temperature),
+    static_cast<double>(feedback.left.motor_temperature),
+    static_cast<double>(feedback.right.fet_temperature),
+    static_cast<double>(feedback.right.motor_temperature),
+    feedback_ok_ ? "true" : "false", thermal_state_.c_str());
   msg.data = buf;
   pub_motor_state_->publish(msg);
 }
@@ -866,12 +862,32 @@ void ODriveWheelsDriverNode::publish_motor_state() {
 void ODriveWheelsDriverNode::on_motor_enable(const std_msgs::msg::Bool& msg) {
   RCLCPP_DEBUG(get_logger(), "motor_enable received: %s", msg.data ? "true" : "false");
   if (msg.data) {
+    if (!driver_->is_connected()) {
+      RCLCPP_WARN(get_logger(), "motor_enable rejected: CAN is not connected");
+      return;
+    }
     if (thermal_state_ == "critical") {
       RCLCPP_DEBUG(get_logger(), "motor_enable ignored: thermal_state=critical");
       RCLCPP_WARN(get_logger(),
         "motor_enable rejected: thermal state is critical (must cool below warning limits)");
       return;
     }
+    if (can_receive_error_.load()) {
+      RCLCPP_WARN(
+        get_logger(), "motor_enable rejected: CAN receive fault is being handled");
+      return;
+    }
+
+    const auto feedback = driver_->feedback_snapshot();
+    if (!feedback_is_fresh(feedback)) {
+      RCLCPP_WARN(
+        get_logger(),
+        "motor_enable rejected: encoder feedback is not fresh for both wheels");
+      return;
+    }
+    feedback_ok_ = true;
+    reset_motion_targets();
+
     RCLCPP_INFO(get_logger(), "Enabling motors → CLOSED_LOOP_CONTROL");
     const bool left_gains_ok = driver_->set_velocity_gains(
       left_axis_id_, vel_gain_, vel_integrator_gain_);

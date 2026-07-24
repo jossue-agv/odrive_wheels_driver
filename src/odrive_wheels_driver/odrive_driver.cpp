@@ -28,12 +28,15 @@ bool ODriveDriver::connect() {
 
   can_->set_filter(left_axis_id_, right_axis_id_);
   const auto now = std::chrono::steady_clock::now();
-  left_.last_feedback = now;
-  right_.last_feedback = now;
-  left_.last_encoder_feedback = now;
-  right_.last_encoder_feedback = now;
-  left_.encoder_valid = false;
-  right_.encoder_valid = false;
+  {
+    std::lock_guard<std::mutex> lock(feedback_mutex_);
+    left_.last_feedback = now;
+    right_.last_feedback = now;
+    left_.last_encoder_feedback = now;
+    right_.last_encoder_feedback = now;
+    left_.encoder_valid = false;
+    right_.encoder_valid = false;
+  }
   consecutive_send_failures_ = 0;
   return true;
 }
@@ -93,9 +96,11 @@ PollResult ODriveDriver::poll_one(int timeout_ms) {
         break;
       }
       const auto heartbeat = HeartbeatMsg::parse(frame.data);
+      const auto now = std::chrono::steady_clock::now();
+      std::lock_guard<std::mutex> lock(feedback_mutex_);
       axis->state = heartbeat.axis_state;
       axis->errors = heartbeat.active_errors;
-      axis->last_feedback = std::chrono::steady_clock::now();
+      axis->last_feedback = now;
       break;
     }
     case cmd::GET_ENCODER_ESTIMATES: {
@@ -109,13 +114,19 @@ PollResult ODriveDriver::poll_one(int timeout_ms) {
         break;
       }
       const auto now = std::chrono::steady_clock::now();
-      axis->position_turns = encoder.position;
-      axis->velocity_turns_per_s = encoder.velocity;
-      axis->encoder_valid = true;
-      axis->last_feedback = now;
-      axis->last_encoder_feedback = now;
+      {
+        std::lock_guard<std::mutex> lock(feedback_mutex_);
+        axis->position_turns = encoder.position;
+        axis->velocity_turns_per_s = encoder.velocity;
+        axis->encoder_valid = true;
+        axis->last_feedback = now;
+        axis->last_encoder_feedback = now;
+      }
       result.encoder_updated = true;
       result.encoder_node_id = node_id;
+      result.encoder_position_turns = encoder.position;
+      result.encoder_velocity_turns_per_s = encoder.velocity;
+      result.encoder_timestamp = now;
       break;
     }
     case cmd::GET_TEMPERATURE: {
@@ -123,6 +134,7 @@ PollResult ODriveDriver::poll_one(int timeout_ms) {
         break;
       }
       const auto temperature = TemperatureMsg::parse(frame.data);
+      std::lock_guard<std::mutex> lock(feedback_mutex_);
       axis->fet_temperature = temperature.fet_temperature;
       axis->motor_temperature = temperature.motor_temperature;
       break;
@@ -132,6 +144,7 @@ PollResult ODriveDriver::poll_one(int timeout_ms) {
         break;
       }
       const auto bus = VbusMsg::parse(frame.data);
+      std::lock_guard<std::mutex> lock(feedback_mutex_);
       bus_voltage_ = bus.voltage;
       bus_current_ = bus.current;
       break;
@@ -154,6 +167,9 @@ PollResult ODriveDriver::poll() {
     if (result.encoder_updated) {
       aggregate.encoder_updated = true;
       aggregate.encoder_node_id = result.encoder_node_id;
+      aggregate.encoder_position_turns = result.encoder_position_turns;
+      aggregate.encoder_velocity_turns_per_s = result.encoder_velocity_turns_per_s;
+      aggregate.encoder_timestamp = result.encoder_timestamp;
     }
     if (result.invalid_encoder_frame) {
       aggregate.invalid_encoder_frame = true;
@@ -232,6 +248,11 @@ void ODriveDriver::stop_and_idle() {
   set_axis_state(right_axis_id_, AxisState::IDLE);
 }
 
+DriverFeedbackSnapshot ODriveDriver::feedback_snapshot() const {
+  std::lock_guard<std::mutex> lock(feedback_mutex_);
+  return DriverFeedbackSnapshot{left_, right_, bus_voltage_, bus_current_};
+}
+
 const AxisFeedback& ODriveDriver::left() const {
   return left_;
 }
@@ -241,10 +262,12 @@ const AxisFeedback& ODriveDriver::right() const {
 }
 
 double ODriveDriver::bus_voltage() const {
+  std::lock_guard<std::mutex> lock(feedback_mutex_);
   return bus_voltage_;
 }
 
 double ODriveDriver::bus_current() const {
+  std::lock_guard<std::mutex> lock(feedback_mutex_);
   return bus_current_;
 }
 

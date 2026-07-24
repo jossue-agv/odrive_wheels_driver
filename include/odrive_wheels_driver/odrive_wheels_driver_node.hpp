@@ -1,19 +1,19 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <thread>
 
 #include "rclcpp/rclcpp.hpp"
-#include "rclcpp/waitable.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/string.hpp"
 
+#include "odrive_wheels_driver/detail/latest_event_mailbox.hpp"
 #include "odrive_wheels_driver/odrive_driver.hpp"
 
 namespace odrive_wheels_driver {
@@ -57,13 +57,13 @@ private:
   std::unique_ptr<ODriveDriver> driver_;
   bool init_driver();
   bool validate_cyclic_encoder_feedback();
-  void read_can_messages();
   void send_velocity(uint8_t node_id, float vel_turns_per_s);
   void send_velocity_with_ff(uint8_t node_id, float vel_turns_per_s, float torque_ff);
   bool ensure_velocity_limit(float required_vel_limit);
   float apply_wheel_shaping(float target, float& prev_cmd, double scale, float dt);
   void send_axis_state(uint8_t node_id, AxisState state);
   void stop_motors();
+  void reset_motion_targets();
 
   // -- ROS-side control and safety state --
   float left_prev_cmd_ = 0.0f;
@@ -77,22 +77,29 @@ private:
   int feedback_timeout_ms_;   // 0 disables
   bool feedback_ok_ = false;
 
-  void publish_joint_state(uint8_t node_id);
+  struct EncoderPublication {
+    uint8_t node_id = 0;
+    float position_turns = 0.0f;
+    float velocity_turns_per_s = 0.0f;
+    rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
+  };
 
-  // -- Event-driven CAN receive --
-  void start_can_event_loop();
-  void stop_can_event_loop();
-  void can_event_loop();
-  void on_can_ready();
-  rclcpp::CallbackGroup::SharedPtr can_callback_group_;
-  rclcpp::GuardCondition::SharedPtr can_guard_condition_;
-  rclcpp::Waitable::SharedPtr can_waitable_;
-  std::thread can_event_thread_;
-  std::atomic<bool> can_event_stop_{false};
-  std::atomic<bool> can_event_error_{false};
-  std::mutex can_event_mutex_;
-  std::condition_variable can_event_cv_;
-  bool can_event_pending_ = false;
+  void publish_joint_state(const EncoderPublication& sample);
+
+  // -- Event-driven CAN receive and latest-value ROS publication --
+  static constexpr std::size_t kLeftEncoderSlot = 0U;
+  static constexpr std::size_t kRightEncoderSlot = 1U;
+  void start_can_workers();
+  void stop_can_workers();
+  void can_receive_loop();
+  void can_publish_loop();
+  bool store_encoder_publication(EncoderPublication sample);
+  std::thread can_receive_thread_;
+  std::thread can_publish_thread_;
+  std::atomic<bool> can_workers_stop_{false};
+  std::atomic<bool> can_receive_error_{false};
+  std::atomic<int> invalid_encoder_node_id_{-1};
+  detail::LatestEventMailbox<EncoderPublication, 2U> encoder_mailbox_;
   int can_stop_fd_ = -1;
 
   // -- E-stop --
@@ -111,6 +118,7 @@ private:
 
   // -- Motor readiness --
   bool motors_armed() const;
+  bool feedback_is_fresh(const DriverFeedbackSnapshot& feedback) const;
   void publish_motor_state();
   void on_motor_enable(const std_msgs::msg::Bool& msg);
 

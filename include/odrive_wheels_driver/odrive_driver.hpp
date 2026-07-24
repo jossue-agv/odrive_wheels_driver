@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "odrive_wheels_driver/can_socket.hpp"
@@ -26,8 +27,18 @@ struct PollResult {
   bool frame_received = false;
   bool encoder_updated = false;
   uint8_t encoder_node_id = 0;
+  float encoder_position_turns = 0.0f;
+  float encoder_velocity_turns_per_s = 0.0f;
+  std::chrono::steady_clock::time_point encoder_timestamp{};
   bool invalid_encoder_frame = false;
   uint8_t invalid_encoder_node_id = 0;
+};
+
+struct DriverFeedbackSnapshot {
+  AxisFeedback left;
+  AxisFeedback right;
+  double bus_voltage = 0.0;
+  double bus_current = 0.0;
 };
 
 // Standalone ODrive S1 CANSimple interface. This class contains no ROS code.
@@ -56,6 +67,9 @@ public:
   bool set_velocity_limit(uint8_t node_id, float vel_limit);
   void stop_and_idle();
 
+  DriverFeedbackSnapshot feedback_snapshot() const;
+
+  // Legacy single-threaded accessors. Concurrent users should use feedback_snapshot().
   const AxisFeedback& left() const;
   const AxisFeedback& right() const;
   double bus_voltage() const;
@@ -70,6 +84,7 @@ private:
   uint8_t left_axis_id_;
   uint8_t right_axis_id_;
   std::unique_ptr<CANSocket> can_;
+  mutable std::mutex feedback_mutex_;
   AxisFeedback left_;
   AxisFeedback right_;
   double bus_voltage_ = 0.0;

@@ -48,7 +48,10 @@ ros2 launch odrive_wheels_driver odrive_wheels_driver.launch.py
   standalone C++ library for ODrive S1 CAN communication, commands, encoder feedback, and errors.
 - `include/odrive_wheels_driver/can_socket.hpp` + `src/can_socket.cpp`: SocketCAN transport used by the library.
 - `include/odrive_wheels_driver/odrive_protocol.hpp`: CANSimple message parsing and packing.
-- `src/odrive_wheels_driver_node.cpp`: upper ROS 2 layer and executable entry point that consumes the standalone library.
+- `src/odrive_wheels_driver_node.cpp`: upper ROS 2 layer. A dedicated receive
+  worker drains SocketCAN into one latest-value mailbox per wheel. A separate
+  publisher worker sends the newest pending samples, so ROS/DDS latency cannot
+  stall CAN reception or create an odometry backlog.
 
 ## Dev Tools (Python, in `scripts/` — commissioning only, never in the robot runtime)
 
@@ -99,7 +102,10 @@ ros2 run odrive_wheels_driver check_odrive_config --apply
 ## Key Algorithms
 
 - **Feedback watchdog**: Stops and idles both axes when either encoder stream expires
-- **Encoder feedback**: A SocketCAN event wakes the ROS executor; each `GET_ENCODER_ESTIMATES` frame publishes one wheel without RTR or an encoder timer
+- **Encoder feedback**: A dedicated worker blocks on SocketCAN and drains every
+  cyclic `GET_ENCODER_ESTIMATES` frame without encoder RTR or a timer. Each wheel
+  has one overwriteable latest-value slot; ROS/DDS publication happens on a
+  separate worker and can never block CAN reception or replay stale backlog.
 - **Inverse kinematics**: `v_left/right = (linear_x -/+ angular_z * track_width/2) / (wheel_radius * 2pi) * gear_ratio`
 - **Wheel shaping pipeline**: Zero bypass -> asymmetric accel/decel limiter -> stiction compensation -> torque feedforward
 - **CAN protocol**: Arbitration ID = `(node_id << 5) | cmd_id`, commands: HEARTBEAT, GET_ENCODER_ESTIMATES, SET_INPUT_VEL, SET_AXIS_STATE, GET_TEMPERATURE, GET_VBUS_VOLTAGE
